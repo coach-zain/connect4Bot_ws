@@ -10,7 +10,7 @@ Key subsystems include:
 - Perception (state of play tracking)
 - Algorithm (decision making)
 - VR Integration (for fun!)
-- Motion Planning and Control (to autonomously score coins)
+- Motion Planning and Control (to autonomously score game pieces)
 - GUI (to interact with the system)
 
-This project was undertaken at part of RS2 AUT26 at UTS Sydney.
+This project was undertaken at part of RS2 AUT26 at UTS Sydney along with Enrique, Nam, and Saket.
