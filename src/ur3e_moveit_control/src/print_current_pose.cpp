@@ -48,7 +48,11 @@ int main(int argc, char* argv[])
       "Orientation: qx=%.4f qy=%.4f qz=%.4f qw=%.4f",
       q.x, q.y, q.z, q.w);
 
-    RCLCPP_INFO(logger, "--------------------------------");
+    RCLCPP_INFO(logger, "=================================");
+    RCLCPP_INFO(logger, "Copy-paste line:");
+    RCLCPP_INFO(logger, "makePose(%.4f, %.4f, %.4f,  %.4f, %.4f, %.4f, %.4f)",
+    p.x, p.y, p.z,
+    q.x, q.y, q.z, q.w);
 
     rate.sleep();
   }
