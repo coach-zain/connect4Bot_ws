@@ -6,6 +6,8 @@
 #include <moveit/move_group_interface/move_group_interface.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 
+// ======================== Helper Functions ================================
+
 // Helper to build a Pose message cleanly
 geometry_msgs::msg::Pose makePose(
   double x, double y, double z,
@@ -22,6 +24,7 @@ geometry_msgs::msg::Pose makePose(
   return p;
 }
 
+// Free Space Cartesian motion through a list of waypoints.
 bool moveToPose(
   moveit::planning_interface::MoveGroupInterface& mgi,
   const geometry_msgs::msg::Pose& target,
@@ -43,6 +46,8 @@ bool moveToPose(
 
 int main(int argc, char* argv[])
 {
+  // ============================= ROS2 Setup =====================================
+
   rclcpp::init(argc, argv);
 
   auto node = std::make_shared<rclcpp::Node>(
@@ -52,12 +57,12 @@ int main(int argc, char* argv[])
 
   auto logger = rclcpp::get_logger("ur3e_pick_and_place");
 
-  // ── Critical: spin the node so getCurrentState() / planning works ──
-  rclcpp::executors::SingleThreadedExecutor executor;
+  rclcpp::executors::SingleThreadedExecutor executor; // spin the node so getCurrentState() / planning works
   executor.add_node(node);
   auto spinner = std::thread([&executor]() { executor.spin(); });
 
-  // ── MoveGroup for the UR3e ──────────────────────────────────────────
+  // ======================== MoveGroupInterface Setup ================================
+
   using moveit::planning_interface::MoveGroupInterface;
   MoveGroupInterface mgi(node, "ur_manipulator");
 
@@ -65,30 +70,31 @@ int main(int argc, char* argv[])
   mgi.setMaxAccelerationScalingFactor(0.3);
   mgi.setPlanningTime(10.0);               // seconds to allow for planning
 
-  // ── Log where the robot currently is ───────────────────────────────
   auto current = mgi.getCurrentPose();
   RCLCPP_INFO(logger, "Current EEF: x=%.3f y=%.3f z=%.3f",
     current.pose.position.x,
     current.pose.position.y,
     current.pose.position.z);
 
-  // ── Define your poses ───────────────────────────────────────────────
-  // These are placeholders — replace with values from RViz/your setup.
-  // Orientation here keeps the end effector pointing straight down.
-  // (qx=1, qw=0 flips Z down — tune to match your TCP orientation)
+  // ============================= Define poses =======================================
+  auto wp0      = makePose(0.3290, 0.2910, 0.3440,  0.8485, -0.4986, -0.0867, -0.1549); // between reset and prePick
+  auto prePick  = makePose(0.3223, 0.1641, 0.113,  0.9087, -0.4170, -0.0084, 0.0150);  // just above pick
+  auto pick     = makePose(0.3222, 0.1618, 0.0557,  0.9087, -0.4171, -0.0085, 0.0150);  // drop down to pick
+  auto wp1      = makePose(0.0, -0.3, 0.10,  1.0, 0.0, 0.0, 0.0);
+  auto prePlace = makePose(0.2,  0.0, 0.25,  1.0, 0.0, 0.0, 0.0);
+  auto place    = makePose(0.0, -0.3, 0.25,  1.0, 0.0, 0.0, 0.0);
+  auto reset    = makePose(0.0000,  0.2232, 0.6939,  -0.7071, 0.0000, 0.0000, 0.7071);
 
-  auto pre_grasp = makePose(0.1645,  0.0473, 0.6589,  -0.7071, 0.0005, 0.0006, 0.7071);
-  auto grasp     = makePose(0.0000,  0.2232, 0.6939,  -0.7071, 0.0000, 0.0000, 0.7071);
-  auto lift      = makePose(0.2,  0.0, 0.25,  1.0, 0.0, 0.0, 0.0);
-  auto place     = makePose(0.0, -0.3, 0.25,  1.0, 0.0, 0.0, 0.0);
-  auto drop      = makePose(0.0, -0.3, 0.10,  1.0, 0.0, 0.0, 0.0);
+  // ======================== Pick and Place Sequence ================================
 
-  // ── Pick and place sequence ─────────────────────────────────────────
-  RCLCPP_INFO(logger, "Moving to pre-grasp...");
-  moveToPose(mgi, pre_grasp, logger);
+  RCLCPP_INFO(logger, "Moving to wp0...");
+  moveToPose(mgi, wp0, logger);
 
-  RCLCPP_INFO(logger, "Descending to grasp...");
-  moveToPose(mgi, grasp, logger);
+  RCLCPP_INFO(logger, "Moving to prePick...");
+  moveToPose(mgi, prePick, logger);
+
+  RCLCPP_INFO(logger, "Descending to pick (Cartesian)...");
+  moveToPose(mgi, pick, logger);
 
   // // TODO: call your gripper close service/topic here
   // // e.g. publish to /gripper_control or call your servo node
@@ -111,7 +117,7 @@ int main(int argc, char* argv[])
   // RCLCPP_INFO(logger, "Returning to lift height...");
   // moveToPose(mgi, lift, logger);  // reuse lift pose as a safe retreat
 
-  // ── Cleanup ─────────────────────────────────────────────────────────
+  // ======================== Cleanup ================================
   rclcpp::shutdown();
   spinner.join();
   return 0;
