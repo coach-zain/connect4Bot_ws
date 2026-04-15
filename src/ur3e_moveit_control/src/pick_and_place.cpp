@@ -5,6 +5,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <moveit/move_group_interface/move_group_interface.hpp>
 #include <geometry_msgs/msg/pose.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 // ======================== Helper Functions ================================
 
@@ -61,6 +62,12 @@ int main(int argc, char* argv[])
   executor.add_node(node);
   auto spinner = std::thread([&executor]() { executor.spin(); });
 
+  auto gripper_pub =
+  node->create_publisher<std_msgs::msg::Bool>(
+    "/gripper_command",
+    10
+  );
+
   // ======================== MoveGroupInterface Setup ================================
 
   using moveit::planning_interface::MoveGroupInterface;
@@ -81,12 +88,26 @@ int main(int argc, char* argv[])
   auto prePick  = makePose(0.3223, 0.1641, 0.113,  0.9087, -0.4170, -0.0084, 0.0150);  // just above pick
   auto pick     = makePose(0.3222, 0.1618, 0.0557,  0.9087, -0.4171, -0.0085, 0.0150);  // drop down to pick
   auto wp1      = makePose(0.0, -0.3, 0.10,  1.0, 0.0, 0.0, 0.0);
-  auto prePlace = makePose(0.2,  0.0, 0.25,  1.0, 0.0, 0.0, 0.0);
+  auto wp2      = makePose(0.2851, 0.3432, 0.2571,  0.9863, -0.1577, -0.0143, -0.0470);
+  auto prePlace = makePose(0.0932, 0.4568, 0.3391,  0.7620, 0.6475, 0.0088, 0.0099);
   auto place    = makePose(0.0, -0.3, 0.25,  1.0, 0.0, 0.0, 0.0);
   auto reset    = makePose(0.0000,  0.2232, 0.6939,  -0.7071, 0.0000, 0.0000, 0.7071);
 
   // ======================== Pick and Place Sequence ================================
 
+  std_msgs::msg::Bool open_msg;
+  open_msg.data = false;
+
+  RCLCPP_INFO(logger, "Opening gripper");
+
+  for (int i = 0; i < 10; i++)
+  {
+    gripper_pub->publish(open_msg);
+    rclcpp::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  rclcpp::sleep_for(std::chrono::seconds(1));
+  
   RCLCPP_INFO(logger, "Moving to wp0...");
   moveToPose(mgi, wp0, logger);
 
@@ -96,13 +117,40 @@ int main(int argc, char* argv[])
   RCLCPP_INFO(logger, "Descending to pick (Cartesian)...");
   moveToPose(mgi, pick, logger);
 
-  // // TODO: call your gripper close service/topic here
-  // // e.g. publish to /gripper_control or call your servo node
-  // RCLCPP_INFO(logger, "[Hook] Close gripper here");
-  // rclcpp::sleep_for(std::chrono::seconds(1));
+  std_msgs::msg::Bool close_msg;
+  close_msg.data = true;
 
-  // RCLCPP_INFO(logger, "Lifting...");
-  // moveToPose(mgi, lift, logger);
+  RCLCPP_INFO(logger, "Closing gripper");
+
+  // Publish multiple times
+  for (int i = 0; i < 10; i++)
+  {
+    gripper_pub->publish(close_msg);
+    rclcpp::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  rclcpp::sleep_for(std::chrono::seconds(1));
+
+  // TODO: call your gripper close service/topic here
+  // e.g. publish to /gripper_control or call your servo node
+  RCLCPP_INFO(logger, "[Hook] Close gripper here");
+  rclcpp::sleep_for(std::chrono::seconds(1));
+
+  RCLCPP_INFO(logger, "Moving to WP2...");
+  moveToPose(mgi, wp2, logger);
+
+  RCLCPP_INFO(logger, "Lifting...");
+  moveToPose(mgi, prePlace, logger);
+
+  RCLCPP_INFO(logger, "Opening gripper");
+
+  for (int i = 0; i < 10; i++)
+  {
+    gripper_pub->publish(open_msg);
+    rclcpp::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  rclcpp::sleep_for(std::chrono::seconds(1));
 
   // RCLCPP_INFO(logger, "Moving to place position...");
   // moveToPose(mgi, place, logger);
