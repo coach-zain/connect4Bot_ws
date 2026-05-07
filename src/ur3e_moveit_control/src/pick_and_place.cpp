@@ -75,7 +75,7 @@ int main(int argc, char* argv[])
 
   mgi.setMaxVelocityScalingFactor(0.3);    // 30% speed — safe for real hw
   mgi.setMaxAccelerationScalingFactor(0.3);
-  mgi.setPlanningTime(10.0);               // seconds to allow for planning
+  mgi.setPlanningTime(30.0);               // seconds to allow for planning
 
   auto current = mgi.getCurrentPose();
   RCLCPP_INFO(logger, "Current EEF: x=%.3f y=%.3f z=%.3f",
@@ -84,13 +84,14 @@ int main(int argc, char* argv[])
     current.pose.position.z);
 
   // ============================= Define poses =======================================
+  // auto wp0      = makePose(0.1737, 0.2076, 0.6410,  -0.7062, 0.3622, -0.0368, 0.6072); // test wp, delete after
   auto wp0      = makePose(0.3290, 0.2910, 0.3440,  0.8485, -0.4986, -0.0867, -0.1549); // between reset and prePick
-  auto prePick  = makePose(0.3223, 0.1641, 0.113,  0.9087, -0.4170, -0.0084, 0.0150);  // just above pick
-  auto pick     = makePose(0.3222, 0.1618, 0.0557,  0.9087, -0.4171, -0.0085, 0.0150);  // drop down to pick
+  auto prePick  = makePose(0.3356, 0.0498, 0.1484,  -0.6502, 0.7595, 0.0058, 0.0162); // just above pick         
+  auto pick     = makePose(0.3357, 0.0496, 0.0581,  -0.6501, 0.7597, 0.0056, 0.0159); // drop down to pick
   auto wp1      = makePose(0.0, -0.3, 0.10,  1.0, 0.0, 0.0, 0.0);
   auto wp2      = makePose(0.2851, 0.3432, 0.2571,  0.9863, -0.1577, -0.0143, -0.0470);
-  auto prePlace = makePose(0.0932, 0.4568, 0.3391,  0.7620, 0.6475, 0.0088, 0.0099);
-  auto place    = makePose(0.0, -0.3, 0.25,  1.0, 0.0, 0.0, 0.0);
+  auto prePlace = makePose(0.0932, 0.4568, 0.304,  0.7620, 0.6475, 0.0088, 0.0099);
+  auto place    = makePose(0.0932, 0.4568, 0.2925,  0.7620, 0.6475, 0.0088, 0.0099);
   auto reset    = makePose(0.0000,  0.2232, 0.6939,  -0.7071, 0.0000, 0.0000, 0.7071);
 
   // ======================== Pick and Place Sequence ================================
@@ -129,11 +130,6 @@ int main(int argc, char* argv[])
     rclcpp::sleep_for(std::chrono::milliseconds(100));
   }
 
-  rclcpp::sleep_for(std::chrono::seconds(1));
-
-  // TODO: call your gripper close service/topic here
-  // e.g. publish to /gripper_control or call your servo node
-  RCLCPP_INFO(logger, "[Hook] Close gripper here");
   rclcpp::sleep_for(std::chrono::seconds(1));
 
   RCLCPP_INFO(logger, "Moving to WP2...");
