@@ -3,11 +3,14 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <future>
+#include <iostream>
 
 #include <rclcpp/rclcpp.hpp>
 #include <moveit/move_group_interface/move_group_interface.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/int32.hpp>
 
 // ======================== Helper Functions ================================
 
@@ -26,7 +29,6 @@ geometry_msgs::msg::Pose makePose(
   return p;
 }
 
-// Joint-space move — no IK involved, always reaches the exact same robot config
 bool moveToJoints(
   moveit::planning_interface::MoveGroupInterface& mgi,
   const std::map<std::string, double>& joint_targets,
@@ -34,7 +36,6 @@ bool moveToJoints(
 {
   mgi.setStartStateToCurrentState();
   mgi.setJointValueTarget(joint_targets);
-
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   bool success = static_cast<bool>(mgi.plan(plan));
   if (success) {
@@ -46,7 +47,6 @@ bool moveToJoints(
   return success;
 }
 
-// Cartesian pose move — used only for pick/place poses where precision matters
 bool moveToPose(
   moveit::planning_interface::MoveGroupInterface& mgi,
   const geometry_msgs::msg::Pose& target,
@@ -54,7 +54,6 @@ bool moveToPose(
 {
   mgi.setStartStateToCurrentState();
   mgi.setPoseTarget(target);
-
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   bool success = static_cast<bool>(mgi.plan(plan));
   if (success) {
@@ -81,29 +80,79 @@ void setGripper(
   rclcpp::sleep_for(std::chrono::seconds(1));
 }
 
+// ======================== Column Commander ================================
+// Subscribes to /column_command (Int32).
+// Call waitForColumn() to block until a valid column (1-3) is published.
+// The executor spinning in the background thread fires the callback automatically.
+
+class ColumnCommander
+{
+public:
+  explicit ColumnCommander(rclcpp::Node::SharedPtr node)
+  {
+    sub_ = node->create_subscription<std_msgs::msg::Int32>(
+      "/column_command",
+      10,
+      [this](std_msgs::msg::Int32::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (promise_ && msg->data >= 1 && msg->data <= 3) {
+          promise_->set_value(msg->data);
+          promise_.reset();  // consume — won't fire again until next waitForColumn()
+        }
+      });
+  }
+
+  // Blocks until a valid column (1-3) is published on /column_command.
+  int waitForColumn(int pieceNumber)
+  {
+    std::future<int> future;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      promise_ = std::make_shared<std::promise<int>>();
+      future = promise_->get_future();
+    }
+    RCLCPP_INFO(rclcpp::get_logger("column_commander"),
+      "Piece %d picked — waiting for /column_command (publish 1, 2, or 3)...",
+      pieceNumber);
+    int col = future.get();  // blocks here until callback fires
+    RCLCPP_INFO(rclcpp::get_logger("column_commander"),
+      "Received column %d — executing place.", col);
+    return col;
+  }
+
+private:
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_;
+  std::shared_ptr<std::promise<int>> promise_;
+  std::mutex mutex_;
+};
+
 // ======================== Core Pick and Place Function ================================
 
 void pickAndPlace(
   moveit::planning_interface::MoveGroupInterface& mgi,
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub,
+  ColumnCommander& commander,
   const geometry_msgs::msg::Pose& pickPose,
-  const geometry_msgs::msg::Pose& placePose,
+  const std::vector<geometry_msgs::msg::Pose>& placePoses,
   const std::map<std::string, double>& wp0Joints,
   const std::map<std::string, double>& wp1Joints,
   const std::map<std::string, double>& wp2Joints,
   const std::map<std::string, double>& prePlaceJoints,
   const rclcpp::Logger& logger,
+  int pieceNumber,
   double prePickZOffset = 0.09)
 {
   geometry_msgs::msg::Pose prePick = pickPose;
   prePick.position.z += prePickZOffset;
 
   // --- Pick sequence ---
+  RCLCPP_INFO(logger, "=== Piece %d: Starting pick sequence ===", pieceNumber);
+
   RCLCPP_INFO(logger, "Moving to wp0 (joint)...");
   moveToJoints(mgi, wp0Joints, logger);
 
-  RCLCPP_INFO(logger, "Moving to wp1 (joint)...");  
-  moveToJoints(mgi, wp1Joints, logger);             
+  RCLCPP_INFO(logger, "Moving to wp1 (joint)...");
+  moveToJoints(mgi, wp1Joints, logger);
 
   RCLCPP_INFO(logger, "Moving to prePick...");
   moveToPose(mgi, prePick, logger);
@@ -116,25 +165,28 @@ void pickAndPlace(
   RCLCPP_INFO(logger, "Ascending after pick...");
   moveToPose(mgi, prePick, logger);
 
-  // --- Place sequence ---
-  RCLCPP_INFO(logger, "Moving to wp1 (joint)...");  
-  moveToJoints(mgi, wp1Joints, logger); 
+  RCLCPP_INFO(logger, "Moving to wp1 (joint)...");
+  moveToJoints(mgi, wp1Joints, logger);
 
-  RCLCPP_INFO(logger, "Moving to wp2 (joint)...");
+  RCLCPP_INFO(logger, "Moving to wp2 (joint) — waiting for column command...");
   moveToJoints(mgi, wp2Joints, logger);
 
+  // --- Wait for column via ROS topic ---
+  int col = commander.waitForColumn(pieceNumber);
+
+  // --- Place sequence ---
   RCLCPP_INFO(logger, "Moving to prePlace (joint)...");
   moveToJoints(mgi, prePlaceJoints, logger);
 
-  RCLCPP_INFO(logger, "Moving to place column...");
-  moveToPose(mgi, placePose, logger);
+  RCLCPP_INFO(logger, "Moving to place column %d...", col);
+  moveToPose(mgi, placePoses[col - 1], logger);
 
   setGripper(gripper_pub, false, logger);
 
   RCLCPP_INFO(logger, "Retreating to prePlace (joint)...");
   moveToJoints(mgi, prePlaceJoints, logger);
 
-  RCLCPP_INFO(logger, "Pick and place complete.");
+  RCLCPP_INFO(logger, "=== Piece %d: Pick and place complete ===", pieceNumber);
 }
 
 // ======================== Main ================================
@@ -155,6 +207,12 @@ int main(int argc, char* argv[])
 
   auto gripper_pub = node->create_publisher<std_msgs::msg::Bool>("/gripper_command", 10);
 
+  // Column commander listens on /column_command
+  // To send a command manually from terminal:
+  //   ros2 topic pub --once /column_command std_msgs/msg/Int32 "{data: 2}"
+  // The connect4 solver just publishes to the same topic.
+  ColumnCommander commander(node);
+
   using moveit::planning_interface::MoveGroupInterface;
   MoveGroupInterface mgi(node, "ur_manipulator");
   mgi.setMaxVelocityScalingFactor(0.3);
@@ -169,23 +227,10 @@ int main(int argc, char* argv[])
     current.pose.position.z);
 
   // ======================== Transit Poses — Joint Space ================================
-  // Raw recorded values are normalized to [-pi, pi] so the planner can reach them.
-  // Normalization: if value > pi, subtract 2*pi. If value < -pi, add 2*pi.
-  //
-  // wp0 corrections:
-  //   shoulder_pan:  4.1281 - 2pi = -2.1551
-  //   shoulder_lift: 3.3676 - 2pi = -2.9156
-  //   wrist_1:       3.8216 - 2pi = -2.4616
-  //   wrist_2:      -4.5245 + 2pi =  1.7587
-  //
-  // reset corrections:
-  //   shoulder_lift: 4.6900 - 2pi = -1.5932
-  //
-  // wp2 and prePlace were already in [-pi, pi] — no changes needed.
 
   std::map<std::string, double> resetJoints = {
     {"elbow_joint",         0.02404579374743503},
-    {"shoulder_lift_joint", -1.5932},   // 4.6900 - 2pi
+    {"shoulder_lift_joint", -1.5932},
     {"shoulder_pan_joint",  -0.02976396116565512},
     {"wrist_1_joint",       -1.557438005806942},
     {"wrist_2_joint",       0.030023697029965067},
@@ -194,20 +239,20 @@ int main(int argc, char* argv[])
 
   std::map<std::string, double> wp0Joints = {
     {"elbow_joint",         0.9688706176852158},
-    {"shoulder_lift_joint", -2.9156},   // 3.3676 - 2pi
-    {"shoulder_pan_joint",  -2.1551},   // 4.1281 - 2pi
-    {"wrist_1_joint",       -2.4616},   // 3.8216 - 2pi
-    {"wrist_2_joint",       1.7587},    // -4.5245 + 2pi
+    {"shoulder_lift_joint", -2.9156},
+    {"shoulder_pan_joint",  -2.1551},
+    {"wrist_1_joint",       -2.4616},
+    {"wrist_2_joint",       1.7587},
     {"wrist_3_joint",       0.5066508667981687}
   };
 
-    std::map<std::string, double> wp1Joints = {
+  std::map<std::string, double> wp1Joints = {
     {"elbow_joint",         -1.4082554397536577},
     {"shoulder_lift_joint", -1.9788557558037776},
     {"shoulder_pan_joint",  -2.5293148632113325},
     {"wrist_1_joint",       -1.2885034904065222},
     {"wrist_2_joint",       1.5855746760621088},
-    {"wrist_3_joint",      0.4416724750908781 }
+    {"wrist_3_joint",       0.4416724750908781}
   };
 
   std::map<std::string, double> wp2Joints = {
@@ -218,7 +263,6 @@ int main(int argc, char* argv[])
     {"wrist_2_joint",       -1.4814113477976116},
     {"wrist_3_joint",       -0.69140612923975}
   };
-
 
   std::map<std::string, double> prePlaceJoints = {
     {"elbow_joint",         0.6021024453699536},
@@ -231,17 +275,21 @@ int main(int argc, char* argv[])
 
   // ======================== Pick Poses — Cartesian ================================
 
-  auto pick1 = makePose(0.3344,  0.0560, 0.0581, -0.6501, 0.7596, 0.0059, 0.0161); // 0,0
-  auto pick2 = makePose(0.3361,  0.0138, 0.0581, -0.6501, 0.7596, 0.0057, 0.0161); // -1,0
-  auto pick3 = makePose(0.3367, -0.0261, 0.0596, -0.6501, 0.7596, 0.0057, 0.0160); // -2,0
-  auto pick4 = makePose(0.2956,  0.0138, 0.0581, -0.6502, 0.7595, 0.0056, 0.0159); // -1,1
-  auto pick5 = makePose(0.3369, -0.1101, 0.0581, -0.6501, 0.7597, 0.0055, 0.0159); // -4,0
+  std::vector<geometry_msgs::msg::Pose> pickPoses = {
+    makePose(0.3344,  0.0560, 0.0581, -0.6501, 0.7596, 0.0059, 0.0161),  // pick1: 0,0
+    makePose(0.3361,  0.0138, 0.0581, -0.6501, 0.7596, 0.0057, 0.0161),  // pick2: -1,0
+    makePose(0.3367, -0.0261, 0.0596, -0.6501, 0.7596, 0.0057, 0.0160),  // pick3: -2,0
+    makePose(0.2956,  0.0138, 0.0581, -0.6502, 0.7595, 0.0056, 0.0159),  // pick4: -1,1
+    makePose(0.3369, -0.1101, 0.0581, -0.6501, 0.7597, 0.0055, 0.0159),  // pick5: -4,0
+  };
 
   // ======================== Place Poses — Cartesian ================================
 
-  auto place1 = makePose(0.0932, 0.4568, 0.2925, 0.7620, 0.6475, 0.0088, 0.0099); 
-  auto place2 = makePose(0.0590, 0.4583, 0.2991, 0.7620, 0.6475, 0.0088, 0.0099);
-  auto place3 = makePose(0.0295, 0.4598, 0.3013, 0.7620, 0.6475, 0.0088, 0.0099);
+  std::vector<geometry_msgs::msg::Pose> placePoses = {
+    makePose(0.0932, 0.4568, 0.2925, 0.7620, 0.6475, 0.0088, 0.0099),  // column 1
+    makePose(0.0590, 0.4583, 0.2991, 0.7620, 0.6475, 0.0088, 0.0099),  // column 2
+    makePose(0.0295, 0.4598, 0.3013, 0.7620, 0.6475, 0.0088, 0.0099),  // column 3
+  };
 
   // ======================== Open gripper before starting ================================
 
@@ -249,13 +297,18 @@ int main(int argc, char* argv[])
 
   // ======================== Pick and Place Sequence ================================
 
-  pickAndPlace(mgi, gripper_pub, pick1, place1, wp0Joints, wp1Joints, wp2Joints, prePlaceJoints, logger);
-  pickAndPlace(mgi, gripper_pub, pick2, place2, wp0Joints, wp1Joints, wp2Joints, prePlaceJoints, logger);
-  pickAndPlace(mgi, gripper_pub, pick3, place3, wp0Joints, wp1Joints, wp2Joints, prePlaceJoints, logger);
+  for (int i = 0; i < static_cast<int>(pickPoses.size()); i++) {
+    pickAndPlace(
+      mgi, gripper_pub, commander,
+      pickPoses[i], placePoses,
+      wp0Joints, wp1Joints, wp2Joints, prePlaceJoints,
+      logger, i + 1
+    );
+  }
 
   // ======================== Return to reset ================================
 
-  RCLCPP_INFO(logger, "Returning to reset...");
+  RCLCPP_INFO(logger, "All pieces placed. Returning to reset...");
   moveToJoints(mgi, resetJoints, logger);
 
   rclcpp::shutdown();
